@@ -182,3 +182,24 @@ func TestOverlongFilenameIsTruncated(t *testing.T) {
 			n, MaxFilenameLen)
 	}
 }
+
+func TestEscapableFilenameSurvivesSidecar(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	// <, > and & expand to 6 bytes each in JSON; the sidecar cap must
+	// still hold the longest permitted name at that width.
+	long := strings.Repeat("<", MaxFilenameLen)
+	obj, err := s.Create(strings.NewReader("x"), 1<<20,
+		Meta{Filename: long, ContentType: "text/plain"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	got, err := s.ReadMeta(obj.Path)
+	if err != nil {
+		t.Fatalf("ReadMeta: %v", err)
+	}
+	if got.Filename != long {
+		t.Errorf("Filename is %d runes, want %d",
+			len([]rune(got.Filename)), MaxFilenameLen)
+	}
+}

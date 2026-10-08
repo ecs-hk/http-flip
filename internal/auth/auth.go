@@ -3,7 +3,7 @@
 //
 // Each presented token is compared against every configured credential without
 // early exit, so response timing does not reveal how much of it was correct.
-// The file is re-read when it changes, which lets an operator rotate or revoke
+// The file is re-read on every upload, which lets an operator rotate or revoke
 // a token by editing a Secret, with no pod restart.
 package auth
 
@@ -12,7 +12,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"os"
 	"regexp"
@@ -73,19 +72,11 @@ func (t token) active(now time.Time) bool {
 	return t.expires.IsZero() || now.Before(t.expires)
 }
 
-// set is an immutable collection of credentials plus the file revision it came
-// from. It is replaced wholesale on reload and never mutated, which is what
-// makes publishing one to lock-free readers safe.
+// set is an immutable collection of credentials. It is replaced wholesale
+// on reload and never mutated, which is what makes publishing one to
+// lock-free readers safe.
 type set struct {
 	tokens []token
-	// stamp identifies the file revision this set was parsed from.
-	stamp stamp
-}
-
-// stamp is the cheap file identity checked on every request.
-type stamp struct {
-	modTime time.Time
-	size    int64
 }
 
 // Authenticator verifies bearer tokens against a file, reloading it when the
@@ -106,7 +97,7 @@ type Authenticator struct {
 // empty token set would silently accept every upload, turning a broken volume
 // mount into an open endpoint.
 func New(path string, log *slog.Logger) (*Authenticator, error) {
-	tokens, st, err := load(path)
+	tokens, err := load(path)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +105,7 @@ func New(path string, log *slog.Logger) (*Authenticator, error) {
 		return nil, fmt.Errorf("token file %q contains no credentials", path)
 	}
 	a := &Authenticator{path: path, log: log, now: time.Now}
-	a.cur.Store(&set{tokens: tokens, stamp: st})
+	a.cur.Store(&set{tokens: tokens})
 	return a, nil
 }
 
@@ -138,51 +129,47 @@ func (a *Authenticator) Authenticate(presented string) (Identity, error) {
 		return Identity{}, ErrNoToken
 	}
 	now := a.now()
-	guess := []byte(presented)
+	// Secrets are hex and therefore case-insensitive; normalize so an
+	// operator pasting uppercase does not get a mysterious rejection.
+	guess := []byte(strings.ToLower(presented))
 
 	var (
-		known   bool
-		expired bool
-		name    string
+		activeName string
+		haveActive bool
+		haveMatch  bool
 	)
 	for _, t := range s.tokens {
 		// ConstantTimeCompare returns 1 on a match and 0 otherwise, in time
 		// that depends only on the lengths of its arguments.
 		if subtle.ConstantTimeCompare(guess, t.secret) == 1 {
-			known, name = true, t.name
-			expired = expired || !t.active(now)
+			haveMatch = true
+			if t.active(now) {
+				activeName, haveActive = t.name, true
+			}
 		}
 	}
 	switch {
-	case !known:
-		return Identity{}, ErrUnknownToken
-	case expired:
+	case haveActive:
+		return Identity{Token: activeName}, nil
+	case haveMatch:
 		return Identity{}, ErrExpired
 	default:
-		return Identity{Token: name}, nil
+		return Identity{}, ErrUnknownToken
 	}
 }
 
-// reload returns the current credential set, re-reading the file first if it
-// has changed on disk.
+// reload returns the current credential set, re-reading the file first.
 //
-// A reload that fails is logged and ignored, leaving the previous set in
-// force. That is a deliberate trade: an operator typo should degrade to a
-// visible error rather than an outage, at the cost of a malformed file
-// revoking nothing until it is corrected.
+// Uploads are infrequent and the file is tiny, so the file is re-read on
+// every call rather than keyed off modTime+size: a same-size edit inside one
+// timestamp tick can never be missed, and there is no stat/read race to
+// reason about. A reload that fails is logged and ignored, leaving the
+// previous set in force. That is a deliberate trade: an operator typo should
+// degrade to a visible error rather than an outage, at the cost of a
+// malformed file revoking nothing until it is corrected.
 func (a *Authenticator) reload() *set {
 	cur := a.cur.Load()
-	st, err := os.Stat(a.path)
-	if err != nil {
-		a.log.Error("cannot stat token file; serving cached credentials",
-			"path", a.path, "err", err, "cached", len(cur.tokens))
-		return cur
-	}
-	if stampOf(st) == cur.stamp {
-		return cur
-	}
-
-	tokens, _, err := load(a.path)
+	tokens, err := load(a.path)
 	if err != nil {
 		a.log.Error("cannot reload token file; serving cached credentials",
 			"path", a.path, "err", err, "cached", len(cur.tokens))
@@ -194,33 +181,43 @@ func (a *Authenticator) reload() *set {
 			"path", a.path, "cached", len(cur.tokens))
 		return cur
 	}
+	if tokensEqual(cur.tokens, tokens) {
+		return cur
+	}
 	a.log.Info("reloaded token file", "path", a.path, "credentials",
 		len(tokens))
-	fresh := &set{tokens: tokens, stamp: stampOf(st)}
+	fresh := &set{tokens: tokens}
 	a.cur.Store(fresh)
 	return fresh
 }
 
-// stampOf extracts the reload key from file metadata.
-func stampOf(st fs.FileInfo) stamp {
-	return stamp{modTime: st.ModTime(), size: st.Size()}
+// tokensEqual reports whether two credential sets hold the same entries,
+// so an unchanged file does not churn the log or the stored pointer.
+func tokensEqual(a, b []token) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].name != b[i].name ||
+			!a[i].expires.Equal(b[i].expires) ||
+			subtle.ConstantTimeCompare(a[i].secret, b[i].secret) != 1 {
+			return false
+		}
+	}
+	return true
 }
 
 // load reads and parses the token file.
-func load(path string) ([]token, stamp, error) {
+func load(path string) ([]token, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, stamp{}, fmt.Errorf("read token file: %w", err)
+		return nil, fmt.Errorf("read token file: %w", err)
 	}
 	tokens, err := parse(string(raw))
 	if err != nil {
-		return nil, stamp{}, fmt.Errorf("parse token file %s: %w", path, err)
+		return nil, fmt.Errorf("parse token file %s: %w", path, err)
 	}
-	st, err := os.Stat(path)
-	if err != nil {
-		return nil, stamp{}, fmt.Errorf("stat token file: %w", err)
-	}
-	return tokens, stampOf(st), nil
+	return tokens, nil
 }
 
 // parse turns token file text into credentials.
@@ -270,6 +267,10 @@ func parse(text string) ([]token, error) {
 			return nil, fmt.Errorf("line %d: secret must be %d hex "+
 				"characters, got %d", num, secretHexLen, len(hexSecret))
 		}
+		// Hex is case-insensitive, so store the lowercase form and compare
+		// against a lowercased presentation: an uppercase paste is the
+		// same secret, not a different one.
+		hexSecret = strings.ToLower(hexSecret)
 		if _, err := hex.DecodeString(hexSecret); err != nil {
 			return nil, fmt.Errorf("line %d: secret is not hex: %w",
 				num, err)

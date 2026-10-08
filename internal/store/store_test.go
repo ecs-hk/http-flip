@@ -432,6 +432,57 @@ func TestConcurrentCreatesAreDistinct(t *testing.T) {
 	}
 }
 
+func TestDeleteRoundTrip(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	obj, err := s.Create(strings.NewReader("payload"), 1024,
+		Meta{Filename: "a.txt"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := s.Delete(obj.Path); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := s.Open(obj.Path); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Open after Delete = %v, want ErrNotFound", err)
+	}
+	if err := s.Delete(obj.Path); !errors.Is(err, ErrNotFound) {
+		t.Errorf("second Delete = %v, want ErrNotFound", err)
+	}
+	entries, err := os.ReadDir(s.Dir())
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("store has %d entries after Delete", len(entries))
+	}
+}
+
+func TestDeleteMalformedIsNotFound(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	for _, p := range []string{"", Rel, Rel + "/../../etc/passwd"} {
+		if err := s.Delete(p); !errors.Is(err, ErrNotFound) {
+			t.Errorf("Delete(%q) = %v, want ErrNotFound", p, err)
+		}
+	}
+}
+
+func TestCreateReturnsTruncatedMeta(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	long := strings.Repeat("x", MaxFilenameLen+50)
+	obj, err := s.Create(strings.NewReader("x"), 1<<20,
+		Meta{Filename: long})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if n := len([]rune(obj.Meta.Filename)); n != MaxFilenameLen {
+		t.Errorf("returned filename is %d runes, want %d",
+			n, MaxFilenameLen)
+	}
+}
+
 func TestNewRejectsUnwritableDir(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root bypasses directory permissions")

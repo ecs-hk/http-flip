@@ -162,6 +162,13 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		// embeds one leak it onward through the Referer header.
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Cross-Origin-Resource-Policy", "same-origin")
+		// JSON and probe responses are never rendered, but a default that
+		// denies everything costs nothing; downloads set a stricter value
+		// of their own. HSTS is honored on the Route's edge TLS and
+		// ignored by plain-HTTP in-cluster probes.
+		h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
+		h.Set("Strict-Transport-Security",
+			"max-age=63072000; includeSubDomains")
 		next.ServeHTTP(w, r)
 	})
 }

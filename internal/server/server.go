@@ -1,9 +1,9 @@
 // Package server exposes the upload and download HTTP surface.
 //
-// Uploads require a bearer token; downloads do not. That asymmetry is
-// deliberate: an upload mutates shared state and so needs an identity
-// attached to it, whereas a download is a read of a capability URL whose
-// path is 94 bits of unguessable secret.
+// Uploads and deletes require a bearer token; downloads do not. That
+// asymmetry is deliberate: a mutation needs an identity attached to it,
+// whereas a download is a read of a capability URL whose path is ~282 bits
+// of unguessable secret.
 package server
 
 import (
@@ -105,7 +105,13 @@ var (
 	errNoStore       = errors.New("server: a store is required")
 	errNoAuth        = errors.New("server: an authenticator is required")
 	errNoUploadLimit = errors.New("server: MaxUploadBytes must be positive")
+	errUploadLimit   = errors.New("server: MaxUploadBytes unreasonably large")
 )
+
+// maxSaneUploadBytes caps the operator flag so that MaxUploadBytes+bodySlack
+// cannot overflow int64 and a typo cannot turn the volume into the only
+// limit. 1 TiB is far above any sane document-drop use.
+const maxSaneUploadBytes = int64(1) << 40
 
 // Options are the collaborators New needs.
 type Options struct {
@@ -125,6 +131,9 @@ func New(opts Options) (*Server, error) {
 	}
 	if opts.Config.MaxUploadBytes <= 0 {
 		return nil, errNoUploadLimit
+	}
+	if opts.Config.MaxUploadBytes > maxSaneUploadBytes {
+		return nil, errUploadLimit
 	}
 	s := &Server{
 		cfg:   opts.Config,
@@ -184,23 +193,23 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /upload", s.authed(http.HandlerFunc(s.handleUpload)))
 
 	// Downloads are open. A GET pattern also matches HEAD, which is what
-	// lets a client check a size without pulling the whole object.
+	// lets a client check a size without pulling the whole object. Deletes
+	// need a token and any valid one will do: knowledge of the unguessable
+	// path is the capability, and the service keeps no per-object owner.
 	mux.Handle("GET "+store.Rel+"/{dir}/{name}",
 		http.HandlerFunc(s.handleDownload))
+	mux.Handle("DELETE "+store.Rel+"/{dir}/{name}",
+		s.authed(http.HandlerFunc(s.handleDelete)))
 
 	for _, probe := range []string{"/healthz", "/livez", "/readyz"} {
 		mux.Handle("GET "+probe, http.HandlerFunc(s.handleProbe))
 	}
 
-	// A catch-all so that an unknown path answers in JSON with the same
-	// headers as everything else, rather than ServeMux's bare text 404.
-	//
-	// It is registered for GET rather than for every method on purpose. A
-	// method-agnostic "/" would itself match, say, a DELETE, and so would
-	// win over the more specific download pattern, turning every 405 into a
-	// misleading 404. Constrained to GET, an unsupported method finds no
-	// match at all and ServeMux answers 405 with a correct Allow header.
-	mux.HandleFunc("GET /", s.handleNotFound)
+	// A method-agnostic catch-all so that an unknown path answers in JSON
+	// with the same headers as everything else, rather than ServeMux's
+	// bare text 404. handleNotFound restores the 405 distinction itself:
+	// a known path with the wrong method still answers 405 with Allow.
+	mux.HandleFunc("/", s.handleNotFound)
 
 	return s.recover(s.securityHeaders(s.logRequests(mux)))
 }

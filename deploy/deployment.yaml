@@ -1,6 +1,6 @@
 # Deployment for httpflip.
 #
-# Apply order: pvc, secret, deployment, service, route, networkpolicy.
+# Apply order: pvc, secret, deployment, service, route.
 # See README.md for the token runbook.
 ---
 apiVersion: apps/v1
@@ -92,7 +92,7 @@ spec:
             - name: data
               mountPath: /data
             - name: tokens
-              mountPath: /etc/httpflip/tokens
+              mountPath: /etc/httpflip
               readOnly: true
             # readOnlyRootFilesystem is on, and Go wants a writable directory
             # for its temporary files even when none are used.

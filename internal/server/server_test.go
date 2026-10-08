@@ -417,6 +417,16 @@ func TestUploadWithTwoFileParts(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400; body %s", rec.Code, rec.Body)
 	}
+	// The already-stored first part must be cleaned up: a rejected upload
+	// leaves nothing behind, reachable or not.
+	entries, err := os.ReadDir(h.store.Dir())
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("store has %d entries after a rejected multi-part upload",
+			len(entries))
+	}
 }
 
 func TestUploadEmptyFile(t *testing.T) {
@@ -472,6 +482,8 @@ func TestSecurityHeadersOnEveryResponse(t *testing.T) {
 		"X-Frame-Options":              "DENY",
 		"Referrer-Policy":              "no-referrer",
 		"Cross-Origin-Resource-Policy": "same-origin",
+		"Content-Security-Policy":      "default-src 'none'; sandbox",
+		"Strict-Transport-Security":    "max-age=63072000; includeSubDomains",
 	}
 	for _, target := range []string{"/healthz", "/nope", "/upload"} {
 		rec := h.do(http.MethodGet, target, nil, nil)
@@ -688,12 +700,85 @@ func TestMethodNotAllowed(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, "")
 	up := decodeUpload(t, h.upload(liveSecret, "a.txt", "text/plain", "x"))
-	rec := h.do(http.MethodDelete, up.Path, nil, nil)
+	// POST is never valid for an object path; DELETE now is (authenticated),
+	// so exercise the 405 with POST.
+	rec := h.do(http.MethodPost, up.Path, nil, nil)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("status = %d, want 405", rec.Code)
 	}
 	if rec.Header().Get("Allow") == "" {
 		t.Error("405 should carry an Allow header")
+	}
+	var body errorBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Errorf("405 body is not JSON: %s", rec.Body)
+	}
+}
+
+func TestUnknownPathMethodsAreJSON404(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, "")
+	for _, m := range []string{
+		http.MethodGet, http.MethodPost, http.MethodPut,
+		http.MethodDelete, http.MethodPatch,
+	} {
+		rec := h.do(m, "/nope", nil, nil)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s /nope status = %d, want 404", m, rec.Code)
+		}
+		var body errorBody
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Errorf("%s /nope body is not JSON: %s", m, rec.Body)
+		}
+	}
+}
+
+func TestDeleteRoundTrip(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, "")
+	up := decodeUpload(t, h.upload(liveSecret, "a.txt", "text/plain",
+		"to delete"))
+
+	rec := h.do(http.MethodDelete, up.Path, nil, map[string]string{
+		"Authorization": "Bearer " + liveSecret,
+	})
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("DELETE status = %d, want 204; body %s",
+			rec.Code, rec.Body)
+	}
+	if got := h.do(http.MethodGet, up.Path, nil, nil); got.Code !=
+		http.StatusNotFound {
+		t.Errorf("GET after DELETE = %d, want 404", got.Code)
+	}
+	again := h.do(http.MethodDelete, up.Path, nil, map[string]string{
+		"Authorization": "Bearer " + liveSecret,
+	})
+	if again.Code != http.StatusNotFound {
+		t.Errorf("second DELETE = %d, want 404", again.Code)
+	}
+	entries, err := os.ReadDir(h.store.Dir())
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("store has %d entries after DELETE", len(entries))
+	}
+}
+
+func TestDeleteRequiresToken(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, "")
+	up := decodeUpload(t, h.upload(liveSecret, "a.txt", "text/plain", "x"))
+	if rec := h.do(http.MethodDelete, up.Path, nil, nil); rec.Code !=
+		http.StatusUnauthorized {
+		t.Errorf("DELETE without token = %d, want 401", rec.Code)
+	}
+	rec := h.do(http.MethodDelete, "/data/XcFCyemkp1GeXYZq/"+
+		"9mZqT4rKxW2vNbHdY7pLcAeFjGhQwErT", nil, map[string]string{
+		"Authorization": "Bearer " + liveSecret,
+	})
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("DELETE missing object = %d, want 404", rec.Code)
 	}
 }
 
@@ -824,6 +909,12 @@ func TestNewValidatesOptions(t *testing.T) {
 	if _, err := New(Options{Config: cfg, Store: st, Auth: a,
 		Logger: log}); err == nil {
 		t.Error("New with a zero upload limit succeeded")
+	}
+	cfg = DefaultConfig()
+	cfg.MaxUploadBytes = 1 << 60
+	if _, err := New(Options{Config: cfg, Store: st, Auth: a,
+		Logger: log}); err == nil {
+		t.Error("New with an absurd upload limit succeeded")
 	}
 }
 

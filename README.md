@@ -2,10 +2,11 @@
 
 A small HTTP service for uploading and downloading files.
 
-Uploads require a bearer token. Downloads do not. The split is deliberate: an
-upload mutates shared state and so needs an identity attached to it, whereas a
-download is a read of a capability URL whose path is 94 bits of unguessable
-secret.
+Uploads and deletes require a bearer token. Downloads do not. The split is
+deliberate: an upload or delete mutates shared state and so needs an
+identity attached to it, whereas a download is a read of a capability URL
+whose path is ~282 bits of unguessable secret (a ~94-bit directory plus a
+~188-bit file name).
 
 - Maximum upload size: 10 MiB, configurable
 - No third-party dependencies; standard library only
@@ -20,6 +21,7 @@ secret.
 | `PUT /upload` | bearer token | Same; every request mints a new path |
 | `GET /data/<dir>/<file>` | none | Download |
 | `HEAD /data/<dir>/<file>` | none | Size and metadata only |
+| `DELETE /data/<dir>/<file>` | bearer token | Delete the object |
 | `GET /healthz`, `/livez`, `/readyz` | none | Probes |
 | anything else | none | `404` |
 
@@ -66,6 +68,22 @@ Range requests and `HEAD` both work. Downloads are always sent as
 rendering it. That is what stops an uploaded `.html` or `.svg` from becoming
 script execution in a downloader's browser.
 
+### Delete
+
+```console
+$ curl --fail -X DELETE \
+    -H "Authorization: Bearer $HTTPFLIP_TOKEN" \
+    https://httpflip.example.com/data/XcFC.../9mZq...
+```
+
+`204` on success with an empty body. Any valid (non-expired) token may
+delete any known URL: knowledge of the unguessable path is the capability,
+and the service keeps no per-object owner to check against. A second delete
+of the same path answers `404`, exactly like a download of a missing object.
+Unauthenticated or expired callers get `401` / `403`, the same as uploads.
+The object, its sidecar and its now-empty parent directory are removed; a
+download already holding the file open keeps its bytes.
+
 ## Managing bearer tokens
 
 This is the operator's runbook.
@@ -84,7 +102,7 @@ batch-runner   c3d4e5f60718293a4b5c6d7e8f90a1b2c   -
 
 - `name` is how the upload appears in logs. Letters, digits, `.`, `_` and `-`,
   up to 64 characters.
-- `secret` is 64 hex characters, i.e. 32 bytes.
+- `secret` is 64 hex characters, i.e. 32 bytes, case-insensitive.
 - `expiry` is an RFC 3339 timestamp, or `-` for no expiry.
 
 A malformed line is a startup error, not a skipped line. If you mistype one,
@@ -124,8 +142,8 @@ $ oc apply -f deploy/deployment.yaml -f deploy/service.yaml -f deploy/route.yaml
 
 ### Rotating a token
 
-Rotation needs no rollout. Adding, removing and expiring all take effect within
-a second, because the service re-checks the file's timestamp on each upload.
+Rotation needs no rollout. Adding, removing and expiring all take effect on
+the next upload, because the service re-reads the token file on each upload.
 
 1. **Add** the new credential alongside the old one:
 
@@ -222,27 +240,35 @@ Timeouts are fixed in `server.DefaultConfig`: 10s for request headers, 5m for a
 whole request, 5m for a response, 120s idle, 64 KiB of headers. The 5-minute
 figures are derived from the upload limit, not chosen independently — 10 MiB at
 about 35 KB/s arrives just inside 5m, which is a slow-but-real link. Anything
-tighter starts failing well-behaved clients.
+tighter starts failing well-behaved clients. The response timeout matters for
+downloads the same way the request timeout matters for uploads.
 
-If you raise `-max-upload-bytes`, check the two timeouts against it and raise
+If you raise `-max-upload-bytes`, check both timeouts against it and raise
 `haproxy.router.openshift.io/timeout` on the Route to match, or the router will
-cut off a large upload before the service ever sees it.
+cut off a large transfer before the service ever sees it. `-max-upload-bytes`
+is additionally capped at 1 TiB so a typo cannot turn the volume into the only
+limit.
 
 ## Operational notes
 
 **Capacity is the volume's problem, not the service's.** Uploads are
 authenticated, so only token holders can consume space, but there is no quota
-inside the service. Size the PVC deliberately and monitor it.
+inside the service. Size the PVC deliberately and monitor it. `DELETE` with a
+valid token reclaims a single object; there is no bulk expiry, so plan a
+reaping story for abandoned URLs.
 
-**Download URLs cannot be revoked.** The path is the credential. Once a URL has
-been shared, logged by a proxy, or pasted into chat, the file is reachable
-indefinitely and there is no way to withdraw it. `Cache-Control: no-store` and
+**Download URLs are capabilities, not revocable grants.** The path is the
+credential. Once a URL has been shared, logged by a proxy, or pasted into
+chat, anyone holding it can download it, and anyone holding it plus a valid
+bearer token can delete it. `DELETE` withdraws the bytes going forward but
+does not undo copies already made. `Cache-Control: no-store` and
 `Referrer-Policy: no-referrer` reduce accidental leakage; they do not undo it.
 
 **The network perimeter is the real boundary.** Bearer tokens stop a client
-that *can* reach the pod from misusing uploads. Nothing in the service stops a
-client that cannot. Keep `deploy/networkpolicy.yaml` tight, and treat the token
-as a second layer rather than the only one.
+that *can* reach the pod from misusing uploads and deletes. Nothing in the
+service stops a client that cannot. Reachability (Route, IP controls) is
+managed outside this repository; treat the token as a second layer rather
+than the only one.
 
 **Uploaded files are never interpreted.** Every download carries
 `X-Content-Type-Options: nosniff`, `Content-Disposition: attachment` and

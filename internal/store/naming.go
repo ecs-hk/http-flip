@@ -71,6 +71,14 @@ func randomBase58(n int) (string, error) {
 	return string(out), nil
 }
 
+// IsObjectPath reports whether p has the shape of a stored object URL.
+// It is the exported form of validatePath for handlers that need to tell a
+// wrong method (405) from an unknown path (404) after routing.
+func IsObjectPath(p string) bool {
+	_, _, ok := validatePath(p)
+	return ok
+}
+
 // validatePath splits rel into its two name components, reporting false for
 // anything that is not exactly Rel/<dir>/<name>.
 //

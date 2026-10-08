@@ -94,8 +94,15 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		if obj != nil {
 			// Refused rather than ignored, because silently discarding an
 			// upload would leave the client believing both were saved. The
-			// first part is already stored at this point.
+			// first part is already stored at this point, so remove it:
+			// an orphan would otherwise consume quota with no URL ever
+			// returned for it.
 			_ = part.Close()
+			if err := s.store.Delete(obj.Path); err != nil {
+				s.log.Warn("could not clean up first part of "+
+					"rejected multi-part upload",
+					"token", id.Token, "path", obj.Path, "err", err)
+			}
 			s.refuseUpload(w, r, id, errMultipleFiles)
 			return
 		}
@@ -119,13 +126,13 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	s.log.Info("stored upload",
 		"token", id.Token, "path", obj.Path, "size", obj.Size,
-		"filename", meta.Filename, "sha256", obj.SHA256, "remote",
+		"filename", obj.Meta.Filename, "sha256", obj.SHA256, "remote",
 		remoteOf(r), "client", clientOf(r))
 
 	s.writeJSON(w, http.StatusCreated, uploadResponse{
 		Path:        obj.Path,
-		Filename:    meta.Filename,
-		ContentType: meta.ContentType,
+		Filename:    obj.Meta.Filename,
+		ContentType: obj.Meta.ContentType,
 		Size:        obj.Size,
 		SHA256:      obj.SHA256,
 		UploadedBy:  id.Token,
@@ -215,6 +222,23 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, "", info.ModTime(), f)
 }
 
+// handleDelete removes a stored object. It requires a valid bearer token,
+// like uploads, but any valid token may delete any known URL: knowledge of
+// the unguessable path is the capability, and the service keeps no
+// per-object owner to check against. A reader holding an open download keeps
+// its bytes; the name simply stops resolving.
+func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
+	id := identityFrom(r)
+	if err := s.store.Delete(r.URL.Path); err != nil {
+		s.notFound(w)
+		return
+	}
+	s.log.Info("deleted object",
+		"token", id.Token, "path", r.URL.Path,
+		"remote", remoteOf(r), "client", clientOf(r))
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleProbe answers liveness and readiness checks.
 func (s *Server) handleProbe(w http.ResponseWriter, _ *http.Request) {
 	h := w.Header()
@@ -224,9 +248,45 @@ func (s *Server) handleProbe(w http.ResponseWriter, _ *http.Request) {
 	_, _ = io.WriteString(w, "ok\n")
 }
 
-// handleNotFound answers any path this service does not serve.
-func (s *Server) handleNotFound(w http.ResponseWriter, _ *http.Request) {
+// handleNotFound answers any path this service does not serve. Because the
+// catch-all is method-agnostic, it must restore the 405 distinction ServeMux
+// would otherwise provide: a known path with the wrong method answers 405
+// with Allow, everything else answers JSON 404.
+func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/upload" {
+		switch r.Method {
+		case http.MethodPost, http.MethodPut:
+		default:
+			s.methodNotAllowed(w, "POST, PUT")
+			return
+		}
+	}
+	for _, probe := range []string{"/healthz", "/livez", "/readyz"} {
+		if r.URL.Path == probe {
+			switch r.Method {
+			case http.MethodGet, http.MethodHead:
+			default:
+				s.methodNotAllowed(w, "GET")
+				return
+			}
+		}
+	}
+	if store.IsObjectPath(r.URL.Path) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodDelete:
+		default:
+			s.methodNotAllowed(w, "GET, HEAD, DELETE")
+			return
+		}
+	}
 	s.notFound(w)
+}
+
+// methodNotAllowed answers a known path with the wrong method.
+func (s *Server) methodNotAllowed(w http.ResponseWriter, allow string) {
+	w.Header().Set("Allow", allow)
+	s.writeJSON(w, http.StatusMethodNotAllowed,
+		errorBody{Error: "method not allowed"})
 }
 
 // notFound answers a missing object. A malformed path is answered the same

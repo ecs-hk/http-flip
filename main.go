@@ -1,7 +1,7 @@
 // Command httpflip is a small HTTP service for uploading and retrieving files.
 //
-// Uploads require a bearer token; downloads do not. See README.md for the
-// operational runbook.
+// Uploads and deletes require a bearer token; downloads do not. See
+// README.md for the operational runbook.
 package main
 
 import (
@@ -132,11 +132,14 @@ func serve(srv *server.Server, log *slog.Logger, timeout time.Duration) error {
 	return nil
 }
 
-// newLogger returns a JSON logger at the requested level, falling back to info
-// for anything unrecognised.
+// newLogger returns a JSON logger at the requested level, falling back to
+// info for anything unrecognised with a warning on stderr so a typo does
+// not pass silently.
 func newLogger(level string) *slog.Logger {
 	var lvl slog.Level
 	if err := lvl.UnmarshalText([]byte(level)); err != nil {
+		fmt.Fprintf(os.Stderr, "httpflip: unknown log level %q, using info\n",
+			level)
 		lvl = slog.LevelInfo
 	}
 	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{

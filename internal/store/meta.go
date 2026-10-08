@@ -24,11 +24,10 @@ const (
 
 	// maxMetaLen bounds what ReadMeta will read. It must allow the longest
 	// permitted field at its worst-case encoded width, plus room for the
-	// JSON scaffolding: a filename of MaxFilenameLen runes can occupy 4
-	// bytes each, and both fields are present at once. Sizing this from
-	// character count instead silently truncates every sidecar holding a
-	// non-ASCII name.
-	maxMetaLen = 4*2*MaxFilenameLen + 256
+	// JSON scaffolding: a filename of MaxFilenameLen runes can occupy 6
+	// bytes per rune once JSON-escaped (<, >, & and controls become
+	// \u00xx), and both fields are present at once.
+	maxMetaLen = 6*2*MaxFilenameLen + 512
 )
 
 // Meta is the caller-supplied description of an upload.

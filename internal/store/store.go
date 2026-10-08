@@ -112,6 +112,12 @@ func (s *Store) Close() error {
 // reader can never observe a partial object, and an interrupted upload leaves
 // nothing behind but a removed temp file.
 func (s *Store) Create(r io.Reader, limit int64, meta Meta) (*Object, error) {
+	// Truncate up front so the returned Meta matches what the sidecar
+	// holds and what a later download reports in its headers.
+	meta = Meta{
+		Filename:    truncateRunes(meta.Filename, MaxFilenameLen),
+		ContentType: truncateRunes(meta.ContentType, MaxFilenameLen),
+	}
 	// The name is minted before the directory so that the only failures
 	// after the directory exists all have a temp file to clean up. It also
 	// cannot collide: a name collision would need the freshly created,
@@ -194,6 +200,32 @@ func (s *Store) Stat(p string) (fs.FileInfo, error) {
 		return nil, ErrNotFound
 	}
 	return info, nil
+}
+
+// Delete removes the object at p along with its sidecar and, when left
+// empty, its parent directory. Any valid bearer token may delete any known
+// URL: knowledge of the unguessable path is the capability. A second delete
+// reports ErrNotFound, exactly like a download of a missing object, so the
+// response reveals nothing beyond what the caller already knew.
+func (s *Store) Delete(p string) error {
+	dir, name, ok := validatePath(p)
+	if !ok {
+		return ErrNotFound
+	}
+	rel := relPath(dir, name)
+	info, err := s.fs.Stat(rel)
+	if err != nil || !info.Mode().IsRegular() {
+		return ErrNotFound
+	}
+	if err := s.fs.Remove(rel); err != nil {
+		return ErrNotFound
+	}
+	_ = s.fs.Remove(relPath(dir, metaName(name)))
+	// The directory holds at most this object and its sidecar, both now
+	// gone, so a successful remove reclaims it; a failure means something
+	// unexpected shares the directory and is safe to ignore.
+	_ = s.fs.Remove(dir)
+	return nil
 }
 
 // mkdirRandom creates and returns a new randomly named subdirectory.

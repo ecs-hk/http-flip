@@ -182,7 +182,8 @@ func TestAuthenticate(t *testing.T) {
 		{"prefix of alpha", secretA[:32], "", ErrUnknownToken},
 		{"alpha plus a byte", secretA + "00", "", ErrUnknownToken},
 		{"alpha with a byte changed", secretA[:63] + "f", "", ErrUnknownToken},
-		{"uppercase hex", strings.ToUpper(secretA), "", ErrUnknownToken},
+		{"uppercase hex is the same secret", strings.ToUpper(secretA),
+			"alpha", nil},
 		{"empty", "", "", ErrNoToken},
 		{"whitespace", " " + secretA, "", ErrUnknownToken},
 		{"wrong separator", "Bearer " + secretA, "", ErrUnknownToken},
@@ -223,6 +224,35 @@ func TestAuthenticateExpiry(t *testing.T) {
 	}
 	if _, err := a.Authenticate(secretC); err != nil {
 		t.Errorf("eternal token err = %v, want nil", err)
+	}
+}
+
+// A duplicated secret with one live entry must still authenticate: expiry
+// is per-match, and success needs only one active match.
+func TestDuplicateSecretMixedExpiry(t *testing.T) {
+	t.Parallel()
+	path := writeTokens(t, strings.Join([]string{
+		"stale  " + secretA + "  2020-01-01T00:00:00Z",
+		"live  " + secretA + "  -",
+	}, "\n"))
+	a, err := New(path, discardLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := a.Authenticate(secretA); err != nil {
+		t.Errorf("duplicated secret with a live entry err = %v, want nil",
+			err)
+	}
+	doubled := writeTokens(t, strings.Join([]string{
+		"stale1  " + secretA + "  2020-01-01T00:00:00Z",
+		"stale2  " + secretA + "  2021-01-01T00:00:00Z",
+	}, "\n"))
+	b, err := New(doubled, discardLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := b.Authenticate(secretA); !errors.Is(err, ErrExpired) {
+		t.Errorf("all-expired duplicate err = %v, want ErrExpired", err)
 	}
 }
 
