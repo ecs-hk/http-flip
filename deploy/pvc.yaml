@@ -1,0 +1,16 @@
+# Storage for uploaded objects.
+#
+# Size this deliberately: uploads are anonymous-by-capability-URL and there is
+# no quota inside the service, so this claim is the only thing standing between
+# a busy day and a full volume. See README.md.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: httpflip-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  # storageClassName: ocs-storagecluster.ceph.redhat.com   # OpenShift Data Foundation

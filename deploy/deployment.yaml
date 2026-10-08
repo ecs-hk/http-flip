@@ -1,0 +1,119 @@
+# Deployment for httpflip.
+#
+# Apply order: pvc, secret, deployment, service, route, networkpolicy.
+# See README.md for the token runbook.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: httpflip
+  labels:
+    app.kubernetes.io/name: httpflip
+spec:
+  # Recreate, not RollingUpdate. The data volume is ReadWriteOnce, so a second
+  # replica would have to wait for the first to release it, and the first will
+  # not release it until it exits. RollingUpdate against an RWO PVC with one
+  # replica deadlocks the rollout.
+  strategy:
+    type: Recreate
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: httpflip
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: httpflip
+    spec:
+      # Must exceed the service's own -shutdown-timeout of 30s, so that Go
+      # finishes its drain before the kubelet escalates to SIGKILL.
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        # No runAsUser is set on purpose. OpenShift assigns a UID from the
+        # namespace range, and it is different on every pod start. The service
+        # copes with that by writing objects into directories that are group
+        # writable and setgid, so files inherit the directory's group rather
+        # than the creating process's, and stay readable by the next UID.
+        #
+        # Do not add runAsUser unless you also accept losing namespace-wide
+        # UID isolation.
+        runAsNonRoot: true
+        # fsGroup makes the kubelet set the volume's group to 0 and apply the
+        # setgid bit, which is what makes the above actually hold.
+        fsGroup: 0
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: httpflip
+          image: image-registry.openshift-image-registry.svc:5000/httpflip:latest
+          # imagePullPolicy: Always for an ":latest" tag built into the
+          # internal registry.
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          args:
+            - -addr=:8080
+            - -data-dir=/data
+            - -tokens-file=/etc/httpflip/tokens
+            - -log-level=info
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # Uploads are streamed straight to the volume and never buffered in
+          # memory, so the upload size limit costs memory nothing. This
+          # ceiling is headroom for the http stack, not for request bodies,
+          # and is not a second place to enforce the size limit.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          # Probes go straight to the pod port, bypassing the Route, so they
+          # work regardless of TLS or router configuration.
+          livenessProbe:
+            httpGet: {path: /livez, port: http}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tokens
+              mountPath: /etc/httpflip/tokens
+              readOnly: true
+            # readOnlyRootFilesystem is on, and Go wants a writable directory
+            # for its temporary files even when none are used.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: httpflip-data
+        - name: tokens
+          secret:
+            secretName: httpflip-auth
+            # 0440, not 0400. The kubelet chowns a secret volume to
+            # root:<fsGroup>, and the container runs as a random UID in group
+            # 0. With owner-only permissions it could not read its own tokens
+            # and would crash-loop on startup.
+            defaultMode: 0440
+            items:
+              - key: tokens
+                path: tokens
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

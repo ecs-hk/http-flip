@@ -1,0 +1,23 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: httpflip
+  labels:
+    app.kubernetes.io/name: httpflip
+  annotations:
+    # Generous, so the router does not cut off a maximum-size upload on a slow
+    # link before the service's own limit is reached. Must stay above the
+    # service's -read-timeout. If you raise -max-upload-bytes, revisit this:
+    # at 10 MiB the router timeout is no longer the binding constraint, but at
+    # a larger limit it becomes the first thing to trip.
+    haproxy.router.openshift.io/timeout: 5m
+spec:
+  to:
+    kind: Service
+    name: httpflip
+  port:
+    targetPort: http
+  wildcardPolicy: None
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

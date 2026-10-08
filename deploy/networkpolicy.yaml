@@ -1,0 +1,32 @@
+# This is the real perimeter: the service is not internet-facing, and this is
+# what keeps it that way. Bearer tokens stop a reachable client from misusing
+# uploads; nothing in the service stops an unreachable one.
+#
+# Requires the OpenShift network policy operator (ocs-networkpolicy).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: httpflip
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: httpflip
+  policyTypes:
+    - Ingress
+  ingress:
+    # Replace with the subnets that are actually permitted. The default here is
+    # the whole 10.0.0.0/8 private range, which is deliberately loose: tighten
+    # it before relying on this for anything.
+    - from:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+      ports:
+        - protocol: TCP
+          port: 8080
+    # The kubelet probes the pod directly from the node, which a pod-to-pod
+    # policy would otherwise block.
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080

@@ -1,0 +1,16 @@
+# Build output
+/httpflip
+*.test
+
+# Local runtime state; never commit a real token file
+/data/
+/tokens
+/secret
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# LLM stuff
+prompt.md

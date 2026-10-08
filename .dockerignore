@@ -1,0 +1,8 @@
+.git
+.gitignore
+deploy/
+README.md
+AGENTS.md
+CLAUDE.md
+prompt.md
+*.md
