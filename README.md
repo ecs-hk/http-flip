@@ -100,10 +100,10 @@ One credential per line: `name`, `secret`, `expiry`. Blank lines and `#`
 comments are ignored, including a trailing comment after the third field.
 
 ```
-# name         secret                        expiry
-uploader-01    9f2c1a3d4e5f60718293a4b5c6d7e8f90   -
-uploader-02    a41b7e8829304a1b2c3d4e5f60718293   2027-03-01T00:00:00Z
-batch-runner   c3d4e5f60718293a4b5c6d7e8f90a1b2c   -
+# name         secret                                                  expiry
+uploader-01    f5ff0a1d388b5d56a1e0d56ca6ce71681d3d65bbf84e9f4a38e82bb27ba47edf   -
+uploader-02    ac02ff6c9db9bec0fe26b432998e4c6be19633d77ed838c4eae7abb2650c657a   2027-03-01T00:00:00Z
+batch-runner   dc893662ec5ec2014943a000d87bd8351a11cbae90297ed177322683133697fc   -
 ```
 
 - `name` is how the upload appears in logs. Letters, digits, `.`, `_` and `-`,
