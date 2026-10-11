@@ -468,6 +468,47 @@ func TestDeleteMalformedIsNotFound(t *testing.T) {
 	}
 }
 
+// A removal that fails for a reason other than absence is a
+// storage failure, not a miss: the object is still there, and a
+// not-found answer would claim a deletion that did not happen.
+func TestDeleteStorageFailureIsNotNotFound(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses directory permissions")
+	}
+	s := newStore(t)
+	obj, err := s.Create(strings.NewReader("payload"), 1024, Meta{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	dir, _, ok := validatePath(obj.Path)
+	if !ok {
+		t.Fatalf("path %q is not well formed", obj.Path)
+	}
+	// Removing an entry needs write permission on the directory
+	// holding it; take that away to make the remove fail.
+	objDir := filepath.Join(s.dir, dir)
+	if err := os.Chmod(objDir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	defer func() { _ = os.Chmod(objDir, dirPerm) }()
+
+	err = s.Delete(obj.Path)
+	if err == nil {
+		t.Fatal("Delete succeeded against a read-only directory, want error")
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Fatalf("Delete = %v, want a storage failure, not not-found", err)
+	}
+	if !errors.Is(err, ErrRemove) {
+		t.Fatalf("Delete = %v, want it to wrap ErrRemove", err)
+	}
+	// The object must have survived the failed delete.
+	if _, err := s.Open(obj.Path); err != nil {
+		t.Errorf("Open after a failed delete = %v, want the object intact", err)
+	}
+}
+
 func TestCreateReturnsTruncatedMeta(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)

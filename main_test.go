@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"log/slog"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -370,7 +369,6 @@ func TestLoggerRejectsBadLevel(t *testing.T) {
 	if log == nil {
 		t.Fatal("newLogger returned nil")
 	}
-	var _ slog.Logger = *log
 	if fmt.Sprint(log) == "" {
 		t.Error("logger is empty")
 	}

@@ -5,11 +5,12 @@ metadata:
   labels:
     app.kubernetes.io/name: httpflip
   annotations:
-    # Generous, so the router does not cut off a maximum-size upload on a slow
-    # link before the service's own limit is reached. Must stay above the
-    # service's -read-timeout. If you raise -max-upload-bytes, revisit this:
-    # at 10 MiB the router timeout is no longer the binding constraint, but at
-    # a larger limit it becomes the first thing to trip.
+    # Generous, so the router does not cut off a maximum-size upload on a
+    # slow link before the service's own limit is reached. Must stay at
+    # least the service's -read-timeout. If you raise -max-upload-bytes,
+    # revisit this: at the default 10 MiB a maximum-size upload on a
+    # slow link fits inside 5m, but a larger limit makes the timeouts
+    # the binding constraint, and the router's is the first to trip.
     haproxy.router.openshift.io/timeout: 5m
 spec:
   to:

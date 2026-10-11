@@ -226,11 +226,24 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 // like uploads, but any valid token may delete any known URL: knowledge of
 // the unguessable path is the capability, and the service keeps no
 // per-object owner to check against. A reader holding an open download keeps
-// its bytes; the name simply stops resolving.
+// its bytes; the name simply stops resolving. A missing object answers 404,
+// exactly like a second delete; a removal that fails for another reason
+// answers 500, because the object may have survived it.
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r)
 	if err := s.store.Delete(r.URL.Path); err != nil {
-		s.notFound(w)
+		if errors.Is(err, store.ErrNotFound) {
+			s.notFound(w)
+			return
+		}
+		// Anything else is the volume failing while the
+		// object was still there; a 404 would claim a
+		// deletion that did not happen.
+		s.log.Error("failed to delete object",
+			"token", id.Token, "path", r.URL.Path,
+			"remote", remoteOf(r), "client", clientOf(r), "err", err)
+		s.writeJSON(w, http.StatusInternalServerError,
+			errorBody{Error: "internal error"})
 		return
 	}
 	s.log.Info("deleted object",

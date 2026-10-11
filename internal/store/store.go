@@ -56,6 +56,12 @@ var (
 	// that a caller can use neither the response nor its timing to discover
 	// which paths are well-formed, nor whether a well-formed path exists.
 	ErrNotFound = errors.New("object not found")
+
+	// ErrRemove means an object could not be removed for a reason other
+	// than its absence. It is distinct from ErrNotFound because the object
+	// may still be there: a not-found answer would claim a deletion that
+	// did not happen.
+	ErrRemove = errors.New("cannot remove object")
 )
 
 // Store is a directory of uploads. It is safe for concurrent use: every
@@ -207,6 +213,10 @@ func (s *Store) Stat(p string) (fs.FileInfo, error) {
 // URL: knowledge of the unguessable path is the capability. A second delete
 // reports ErrNotFound, exactly like a download of a missing object, so the
 // response reveals nothing beyond what the caller already knew.
+//
+// A removal that fails for a reason other than absence reports ErrRemove:
+// the object may still be there, and answering ErrNotFound would claim it
+// was gone.
 func (s *Store) Delete(p string) error {
 	dir, name, ok := validatePath(p)
 	if !ok {
@@ -218,7 +228,13 @@ func (s *Store) Delete(p string) error {
 		return ErrNotFound
 	}
 	if err := s.fs.Remove(rel); err != nil {
-		return ErrNotFound
+		// Absence here means a concurrent delete won the race, which is
+		// the same outcome as a second delete. Anything else is the
+		// volume failing, not the request.
+		if errors.Is(err, fs.ErrNotExist) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("%w: %w", ErrRemove, err)
 	}
 	_ = s.fs.Remove(relPath(dir, metaName(name)))
 	// The directory holds at most this object and its sidecar, both now

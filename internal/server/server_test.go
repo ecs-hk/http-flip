@@ -782,6 +782,44 @@ func TestDeleteRequiresToken(t *testing.T) {
 	}
 }
 
+// A volume failure during a delete is a 500, not a 404: the object
+// is still there, and the response must not claim otherwise.
+func TestDeleteStorageFailureIsServerError(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root bypasses directory permissions")
+	}
+	h := newHarness(t, "")
+	up := decodeUpload(t, h.upload(liveSecret, "a.txt", "text/plain", "x"))
+
+	// The object's directory is the first segment of its path.
+	// Removing an entry needs write permission on it; take that
+	// away to make the remove fail.
+	rel := strings.TrimPrefix(up.Path, store.Rel+"/")
+	objDir := filepath.Join(h.store.Dir(), strings.SplitN(rel, "/", 2)[0])
+	if err := os.Chmod(objDir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	defer func() { _ = os.Chmod(objDir, 0o770) }()
+
+	rec := h.do(http.MethodDelete, up.Path, nil, map[string]string{
+		"Authorization": "Bearer " + liveSecret,
+	})
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("DELETE status = %d, want 500; body %s",
+			rec.Code, rec.Body)
+	}
+	var body errorBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Errorf("500 body is not JSON: %s", rec.Body)
+	}
+	// The object survived.
+	if got := h.do(http.MethodGet, up.Path, nil, nil); got.Code !=
+		http.StatusOK {
+		t.Errorf("GET after a failed delete = %d, want 200", got.Code)
+	}
+}
+
 func TestPutUploadIsAccepted(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, "")

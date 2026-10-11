@@ -25,6 +25,10 @@ whose path is ~282 bits of unguessable secret (a ~94-bit directory plus a
 | `GET /healthz`, `/livez`, `/readyz` | none | Probes |
 | anything else | none | `404` |
 
+A known path called with the wrong method — `GET /upload`, `POST
+/data/<dir>/<file>`, `DELETE /healthz` — answers `405` with an
+`Allow` header naming the methods that path accepts.
+
 ### Upload
 
 ```console
@@ -49,9 +53,10 @@ path, so it can be `GET` directly.
 
 | Status | Meaning |
 |---|---|
-| `400` | Not multipart, unparseable body, no file part, or more than one |
+| `400` | Unparseable multipart body, no file part, or more than one |
 | `401` | Missing or unrecognised bearer token |
 | `403` | Token recognised but expired |
+| `405` | A known path used with the wrong method |
 | `413` | File exceeds the configured limit (10 MiB by default) |
 | `415` | `Content-Type` is not `multipart/*` |
 | `500` | Storage failure |
@@ -81,6 +86,7 @@ delete any known URL: knowledge of the unguessable path is the capability,
 and the service keeps no per-object owner to check against. A second delete
 of the same path answers `404`, exactly like a download of a missing object.
 Unauthenticated or expired callers get `401` / `403`, the same as uploads.
+A storage failure gets `500`, and the object may still be there.
 The object, its sidecar and its now-empty parent directory are removed; a
 download already holding the file open keeps its bytes.
 

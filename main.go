@@ -104,11 +104,19 @@ func serve(srv *server.Server, log *slog.Logger, timeout time.Duration) error {
 	// decides the drain is taking too long can force it with Ctrl-C.
 	defer stop()
 
+	// Bind before claiming to listen: a port that is already
+	// taken must surface as a startup error, not as a
+	// "listening" line followed by one.
+	ln, err := srv.Listen()
+	if err != nil {
+		return err
+	}
+	log.Info("listening",
+		"addr", srv.Addr(), "max_upload_bytes", srv.MaxUploadBytes())
+
 	errc := make(chan error, 1)
 	go func() {
-		log.Info("listening",
-			"addr", srv.Addr(), "max_upload_bytes", srv.MaxUploadBytes())
-		errc <- srv.ListenAndServe()
+		errc <- srv.Serve(ln)
 	}()
 
 	select {

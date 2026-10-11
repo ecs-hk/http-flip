@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -161,10 +162,21 @@ func (s *Server) Addr() string { return s.http.Addr }
 // MaxUploadBytes returns the configured per-file upload limit.
 func (s *Server) MaxUploadBytes() int64 { return s.cfg.MaxUploadBytes }
 
-// ListenAndServe serves until the server is shut down. It returns nil on a
-// clean shutdown.
-func (s *Server) ListenAndServe() error {
-	if err := s.http.ListenAndServe(); err != nil &&
+// Listen binds the configured address. Splitting it from Serve lets a
+// caller log between the two, so "listening" is only claimed once a
+// socket actually exists and a bind failure is reported as such.
+func (s *Server) Listen() (net.Listener, error) {
+	ln, err := net.Listen("tcp", s.http.Addr)
+	if err != nil {
+		return nil, fmt.Errorf("listen: %w", err)
+	}
+	return ln, nil
+}
+
+// Serve accepts connections on ln until the server is shut down. It
+// returns nil on a clean shutdown.
+func (s *Server) Serve(ln net.Listener) error {
+	if err := s.http.Serve(ln); err != nil &&
 		!errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serve: %w", err)
 	}

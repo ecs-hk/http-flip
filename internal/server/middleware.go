@@ -48,7 +48,7 @@ func bearerToken(r *http.Request) (string, error) {
 
 var (
 	errMissingHeader = errors.New("no Authorization header")
-	errBadScheme     = errors.New("Authorization scheme is not Bearer")
+	errBadScheme     = errors.New("authorization scheme is not Bearer")
 )
 
 // authed wraps a handler with bearer authentication.

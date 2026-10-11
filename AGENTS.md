@@ -56,7 +56,9 @@ loudly.
 3. **Malformed and absent paths both answer `404`.** Do not distinguish them;
    the distinction is an existence oracle. A second `DELETE` of the same path
    answers `404` exactly like a download of a missing object, for the same
-   reason.
+   reason. The one exception is a removal that fails for a reason other than
+   absence (a volume error): that is a `500`, because the object may still
+   be there and a `404` would claim a deletion that did not happen.
 
 3a. **The upload limit has exactly one definition.**
    `server.DefaultMaxUploadBytes` in `internal/server/server.go` is the only
