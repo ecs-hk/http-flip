@@ -639,7 +639,7 @@ func TestHostileFilenameSurvivesRoundTrip(t *testing.T) {
 
 // Malformed and absent paths must be indistinguishable from the outside.
 //
-// Paths needing cleaning are answered by ServeMux with a redirect to their
+// Paths needing cleaning are answered by ServeMux with a 307 redirect to their
 // cleaned form. That is safe and intentional: the cleaned form is what the
 // client would have had to request anyway, and it reaches no handler here. The
 // invariant under test is therefore that no attempt ever serves bytes, and
@@ -691,7 +691,8 @@ func TestDownloadTraversalAttempts(t *testing.T) {
 	}
 
 	// These are redirected to their cleaned form, which then 404s. What
-	// matters is that the redirect itself serves nothing.
+	// matters is that the redirect itself serves nothing. Go 1.27's ServeMux
+	// answers these with 307 (temporary) rather than 301.
 	redirected := []string{
 		"/data/../../etc/passwd",
 		"/data/" + dir + "/../../etc/passwd",
@@ -703,8 +704,8 @@ func TestDownloadTraversalAttempts(t *testing.T) {
 	}
 	for _, target := range redirected {
 		rec := h.do(http.MethodGet, target, nil, nil)
-		if rec.Code != http.StatusMovedPermanently {
-			t.Errorf("GET %q status = %d, want 301", target, rec.Code)
+		if rec.Code != http.StatusTemporaryRedirect {
+			t.Errorf("GET %q status = %d, want 307", target, rec.Code)
 		}
 		if loc := rec.Header().Get("Location"); strings.Contains(
 			loc, "..") {

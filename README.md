@@ -307,6 +307,9 @@ are. Probe traffic is logged at `debug` so it does not bury everything else.
 
 ## Development
 
+Building or testing needs Go 1.27.4 or newer, matching the `go` directive in
+`go.mod`; the container image builds with `golang:1.27.4-trixie`.
+
 ```console
 $ go build ./...
 $ go test -race ./...
@@ -320,7 +323,7 @@ nothing on disk, filename handling in response headers, and an end-to-end test
 that starts the real binary and drains it with `SIGTERM`.
 
 `main_test.go` compiles the binary and starts it, so `go test ./...` needs a
-working Go toolchain on `PATH` and a few seconds.
+working Go 1.27.4+ toolchain on `PATH` and a few seconds.
 
 ### Layout
 

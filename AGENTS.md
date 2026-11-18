@@ -19,8 +19,8 @@ gofmt -l .
 ```
 
 `main_test.go` builds the binary and starts it, so tests need a working Go
-toolchain on `PATH` and take a few seconds. If `golangci-lint` is available,
-run it too.
+1.27.4+ toolchain on `PATH` and take a few seconds. If `golangci-lint` is
+available, run it too.
 
 ## Architecture
 
