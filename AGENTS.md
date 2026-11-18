@@ -81,7 +81,9 @@ loudly.
    asserts the store directory is empty afterwards. `discard` must remove the
    temp file before the directory, since a directory cannot be removed while
    non-empty. The same holds for the multi-part rejection: the already-stored
-   first part is deleted via `Store.Delete` before answering `400`.
+   first part is deleted via `Store.Delete` before answering `400`. A pod
+   killed mid-upload cannot clean up after itself, so `Store.New` sweeps stale
+   `.tmp-` files, and any directory left holding only them, at startup.
 
 6. **Permissions are pinned with `chmod`, not left to `Mkdir`/`OpenFile`.**
    Both mask through the process umask. `fs.FileMode` spells setgid as
@@ -92,9 +94,9 @@ loudly.
    startup means the process refuses to start. There must never be a path where
    "no credentials configured" means "allow everything". A *reload* failure
    keeps the last good set and logs loudly, which is a different and
-   deliberate trade. Reload re-reads the file on every upload rather than
-   keying off modTime+size, so a same-size edit inside one timestamp tick
-   cannot be missed.
+   deliberate trade. Reload re-reads the file on every authenticated request
+   rather than keying off modTime+size, so a same-size edit inside one
+   timestamp tick cannot be missed.
 
 8. **Token comparison does not early-exit.** `Authenticate` compares against
    every credential and ORs the results. Returning on the first match leaks the

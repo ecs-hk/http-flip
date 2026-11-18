@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net/http"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/mropc/http-flip/internal/auth"
@@ -24,6 +25,9 @@ import (
 // the limit is still refused.
 const bodySlack = 64 << 10
 
+// multipartFormData is the only media type an upload may declare.
+const multipartFormData = "multipart/form-data"
+
 // errMultipleFiles reports a request carrying more than one file part.
 var errMultipleFiles = errors.New("more than one file part")
 
@@ -36,6 +40,23 @@ type readErr struct{ err error }
 func (e readErr) Error() string { return e.err.Error() }
 
 func (e readErr) Unwrap() error { return e.err }
+
+// partReader tags a failure to read the file part as a client fault.
+//
+// Without it the multipart reader's error reaches refuseUpload as an ordinary
+// store failure and becomes a 500: a client whose connection dies mid-upload
+// would be told the server broke, and would be logged as a server error. The
+// store wraps read errors with %w, so the tag survives to refuseUpload. An
+// over-limit body is still classified as 413, because that check runs first.
+type partReader struct{ r io.Reader }
+
+func (p partReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return n, readErr{err}
+	}
+	return n, err
+}
 
 // uploadResponse is the JSON body of a successful upload.
 type uploadResponse struct {
@@ -52,8 +73,12 @@ type uploadResponse struct {
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r)
 
+	// The parser behind MultipartReader accepts multipart/form-data and
+	// multipart/mixed; this service stores one file, so only the former is
+	// offered. Matching the exact type keeps an unsupported multipart/* a
+	// 415 rather than a 400 from the parser.
 	media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || !strings.HasPrefix(media, "multipart/") {
+	if err != nil || media != multipartFormData {
 		s.log.Warn("refused upload with unusable content type",
 			"token", id.Token, "content_type",
 			r.Header.Get("Content-Type"))
@@ -73,8 +98,8 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		obj  *store.Object
-		meta store.Meta
+		obj         *store.Object
+		contentType string
 	)
 	for {
 		part, err := mr.NextPart()
@@ -106,11 +131,9 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			s.refuseUpload(w, r, id, errMultipleFiles)
 			return
 		}
-		meta = store.Meta{
-			Filename:    part.FileName(),
-			ContentType: part.Header.Get("Content-Type"),
-		}
-		obj, err = s.store.Create(part, s.cfg.MaxUploadBytes, meta)
+		contentType = part.Header.Get("Content-Type")
+		obj, err = s.store.Create(partReader{part}, s.cfg.MaxUploadBytes,
+			store.Meta{Filename: part.FileName()})
 		_ = part.Close()
 		if err != nil {
 			s.refuseUpload(w, r, id, err)
@@ -132,7 +155,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusCreated, uploadResponse{
 		Path:        obj.Path,
 		Filename:    obj.Meta.Filename,
-		ContentType: obj.Meta.ContentType,
+		ContentType: contentType,
 		Size:        obj.Size,
 		SHA256:      obj.SHA256,
 		UploadedBy:  id.Token,
@@ -159,6 +182,11 @@ func (s *Server) refuseUpload(
 			Error: "exactly one file part is permitted",
 		})
 	case errors.Is(err, store.ErrTooLarge), errors.As(err, &oversized):
+		// The recorder wrapper hides net/http's unexported "request too
+		// large" hook, so the connection is not closed for us. Doing it
+		// explicitly keeps the rest of an oversized body from being read
+		// and discarded for a client that cannot be served anyway.
+		w.Header().Set("Connection", "close")
 		s.log.Warn("refused oversized upload",
 			"token", id.Token, "limit", s.cfg.MaxUploadBytes,
 			"remote", remoteOf(r))
@@ -193,11 +221,9 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		s.notFound(w)
 		return
 	}
-	meta, err := s.store.ReadMeta(r.URL.Path)
-	if err != nil {
-		s.notFound(w)
-		return
-	}
+	// ReadMeta cannot fail for a path that Open accepted: both validate the
+	// same grammar, and a missing or damaged sidecar reads as an empty Meta.
+	meta, _ := s.store.ReadMeta(r.URL.Path)
 
 	// Fall back to the object's own name so that a download whose sidecar
 	// was lost still saves as something unique rather than "download".
@@ -212,7 +238,6 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	// the whole point is that the browser must not be told what they are.
 	h.Set("Content-Type", "application/octet-stream")
 	h.Set("Content-Disposition", contentDisposition(name))
-	h.Set("Content-Security-Policy", "sandbox; default-src 'none'")
 	// The URL is the credential, so nothing about this response should be
 	// retained in a shared cache.
 	h.Set("Cache-Control", "no-store")
@@ -274,14 +299,12 @@ func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	for _, probe := range []string{"/healthz", "/livez", "/readyz"} {
-		if r.URL.Path == probe {
-			switch r.Method {
-			case http.MethodGet, http.MethodHead:
-			default:
-				s.methodNotAllowed(w, "GET")
-				return
-			}
+	if slices.Contains(probePaths, r.URL.Path) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead:
+		default:
+			s.methodNotAllowed(w, "GET")
+			return
 		}
 	}
 	if store.IsObjectPath(r.URL.Path) {

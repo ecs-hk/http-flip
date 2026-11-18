@@ -23,9 +23,20 @@ const liveSecret = "a1b2c3d4e5f60718293a4b5c6d7e8f90" +
 // buildBinary compiles the command once for the whole test binary.
 var (
 	buildOnce sync.Once
+	binDir    string
 	binPath   string
 	buildErr  error
 )
+
+// TestMain removes the compiled binary afterwards, so a run does not leave a
+// directory behind in TMPDIR.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if binDir != "" {
+		_ = os.RemoveAll(binDir)
+	}
+	os.Exit(code)
+}
 
 func binary(t *testing.T) string {
 	t.Helper()
@@ -35,6 +46,7 @@ func binary(t *testing.T) string {
 			buildErr = err
 			return
 		}
+		binDir = dir
 		binPath = filepath.Join(dir, "httpflip")
 		cmd := exec.Command("go", "build", "-o", binPath, ".")
 		cmd.Stderr = os.Stderr

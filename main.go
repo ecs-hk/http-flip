@@ -39,8 +39,7 @@ func run() error {
 		tokenFile = flag.String("tokens-file", "/etc/httpflip/tokens",
 			"bearer token file")
 		maxUpload = flag.Int64("max-upload-bytes", cfg.MaxUploadBytes,
-			"maximum size of a single uploaded file in bytes "+
-				"(default 10 MiB; see server.DefaultMaxUploadBytes)")
+			"maximum size of a single uploaded file in bytes")
 		logLevel = flag.String("log-level", "info",
 			"log level: debug, info, warn or error")
 		shutdownFor = flag.Duration("shutdown-timeout", cfg.ShutdownTimeout,

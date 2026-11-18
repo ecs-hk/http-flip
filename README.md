@@ -22,7 +22,7 @@ whose path is ~282 bits of unguessable secret (a ~94-bit directory plus a
 | `GET /data/<dir>/<file>` | none | Download |
 | `HEAD /data/<dir>/<file>` | none | Size and metadata only |
 | `DELETE /data/<dir>/<file>` | bearer token | Delete the object |
-| `GET /healthz`, `/livez`, `/readyz` | none | Probes |
+| `GET`/`HEAD /healthz`, `/livez`, `/readyz` | none | Probes |
 | anything else | none | `404` |
 
 A known path called with the wrong method — `GET /upload`, `POST
@@ -34,14 +34,14 @@ A known path called with the wrong method — `GET /upload`, `POST
 ```console
 $ curl --fail -X POST \
     -H "Authorization: Bearer $HTTPFLIP_TOKEN" \
-    -F "file=@report.pdf" \
+    -F "file=@greeting.txt" \
     https://httpflip.example.com/upload
 {
   "path": "/data/XcFCyemkp1GeXYZq/9mZqT4rKxW2vNbHdY7pLcAeFjGhQwErT",
-  "filename": "report.pdf",
-  "content_type": "application/pdf",
-  "size": 1048576,
-  "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  "filename": "greeting.txt",
+  "content_type": "text/plain",
+  "size": 11,
+  "sha256": "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
   "uploaded_by": "uploader-01"
 }
 ```
@@ -53,12 +53,12 @@ path, so it can be `GET` directly.
 
 | Status | Meaning |
 |---|---|
-| `400` | Unparseable multipart body, no file part, or more than one |
+| `400` | Unparseable or truncated multipart body, no file part, or more than one |
 | `401` | Missing or unrecognised bearer token |
 | `403` | Token recognised but expired |
 | `405` | A known path used with the wrong method |
 | `413` | File exceeds the configured limit (10 MiB by default) |
-| `415` | `Content-Type` is not `multipart/*` |
+| `415` | `Content-Type` is not `multipart/form-data` |
 | `500` | Storage failure |
 
 ### Download
@@ -149,15 +149,20 @@ $ oc apply -f deploy/deployment.yaml -f deploy/service.yaml -f deploy/route.yaml
 ### Rotating a token
 
 Rotation needs no rollout. Adding, removing and expiring all take effect on
-the next upload, because the service re-reads the token file on each upload.
+the next authenticated request, because the service re-reads the token file
+every time one arrives.
 
-1. **Add** the new credential alongside the old one:
+1. **Add** the new credential alongside the old one. Write the complete file
+   you want the service to end up with to `tokens.new`, then replace the
+   Secret from it:
 
    ```console
-   $ oc patch secret httpflip-auth --type merge \
-       -p "{\"stringData\":{\"tokens\":\"$(cat tokens.new)\"}}"
+   $ oc create secret generic httpflip-auth --from-file=tokens=./tokens.new \
+       --dry-run=client -o yaml | oc apply -f -
    ```
 
+   The file has to contain the whole set — the old lines plus the new one.
+   Building the Secret this way avoids escaping newlines into a JSON patch.
    Wait a few seconds for the kubelet to sync the volume.
 
 2. **Move clients over.** Verify the new one works:
@@ -169,8 +174,8 @@ the next upload, because the service re-reads the token file on each upload.
    201
    ```
 
-3. **Retire** the old credential by removing its line, and save the Secret
-   again. Anyone still using it now gets `401`.
+3. **Retire** the old credential by removing its line from `tokens.new` and
+   running the same command again. Anyone still using it now gets `401`.
 
 There is no window in which both credentials are refused, because the service
 keeps serving the previously loaded set if it cannot parse the new one. It logs
@@ -179,8 +184,13 @@ silent.
 
 ### Revoking a token
 
-Remove the line and save the Secret. Effective within a second, no rollout.
-Only the named client is affected.
+Remove the line and save the Secret. Effective on the next authenticated
+request, no rollout. Only the named client is affected.
+
+A file that does not parse is discarded whole, so a typo elsewhere in the same
+edit also cancels the removal: the revoked credential keeps working until the
+file is corrected. Watch the logs for `cannot reload token file` when a
+revocation seems not to have taken, and prefer changing one thing at a time.
 
 ### Expiring a token
 
@@ -212,6 +222,7 @@ $ mkdir -p /tmp/httpflip && cd /tmp/httpflip
 $ openssl rand -hex 32 > secret
 $ printf 'dev  %s  -\n' "$(cat secret)" > tokens
 $ cat tokens
+dev  3f8a1c9e2b7d4056a1e3f8c2b9d407e5a1c3f8e2b7d4056a1e3f8c2b9d407e5a  -
 
 $ go run . -addr :8080 -data-dir ./data -tokens-file ./tokens -log-level debug
 ```
@@ -261,7 +272,9 @@ limit.
 authenticated, so only token holders can consume space, but there is no quota
 inside the service. Size the PVC deliberately and monitor it. `DELETE` with a
 valid token reclaims a single object; there is no bulk expiry, so plan a
-reaping story for abandoned URLs.
+reaping story for abandoned URLs. An upload interrupted by a `SIGKILL` can
+leave a temporary file that no URL ever named; the next start removes those,
+so they do not accumulate across restarts.
 
 **Download URLs are capabilities, not revocable grants.** The path is the
 credential. Once a URL has been shared, logged by a proxy, or pasted into

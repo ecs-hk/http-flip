@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -97,6 +98,22 @@ type partSpec struct {
 	filename    string
 	contentType string
 	content     string
+}
+
+// brokenBody yields a valid file part header and some payload, then fails the
+// way a client whose connection dies mid-upload does.
+type brokenBody struct {
+	prefix []byte
+	err    error
+}
+
+func (b *brokenBody) Read(p []byte) (int, error) {
+	if len(b.prefix) == 0 {
+		return 0, b.err
+	}
+	n := copy(p, b.prefix)
+	b.prefix = b.prefix[n:]
+	return n, nil
 }
 
 // multipartBody builds a multipart body from the given parts.
@@ -333,6 +350,56 @@ func TestUploadTooLarge(t *testing.T) {
 	}
 }
 
+// A client whose connection dies mid-upload has made a bad request, not
+// caused a server fault. The bytes land on the volume through the store, so
+// the read failure arrives wrapped in a store error; it must still be
+// classified as the client's.
+func TestUploadTruncatedBodyIsBadRequest(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, "")
+	body := &brokenBody{
+		prefix: []byte("--xx\r\n" +
+			"Content-Disposition: form-data; name=\"file\"; " +
+			"filename=\"a.txt\"\r\n\r\npartial payload"),
+		err: errors.New("connection reset by peer"),
+	}
+	rec := h.do(http.MethodPost, "/upload", body, map[string]string{
+		"Content-Type":  "multipart/form-data; boundary=xx",
+		"Authorization": "Bearer " + liveSecret,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body %s", rec.Code, rec.Body)
+	}
+	entries, err := os.ReadDir(h.store.Dir())
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("store has %d entries after a truncated upload", len(entries))
+	}
+}
+
+// A body that runs past the request cap is a 413 even when the overflow is
+// framing or a form field rather than the file itself, and the connection is
+// marked for closing so the rest is not read for nothing.
+func TestUploadBodyCapIsRequestEntityTooLarge(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, "", withLimit(64))
+	body, ctype := multipartBody(t, []partSpec{
+		{"", "", strings.Repeat("x", 128<<10)},
+	})
+	rec := h.do(http.MethodPost, "/upload", body, map[string]string{
+		"Content-Type":  ctype,
+		"Authorization": "Bearer " + liveSecret,
+	})
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413; body %s", rec.Code, rec.Body)
+	}
+	if got := rec.Header().Get("Connection"); got != "close" {
+		t.Errorf("Connection = %q, want close", got)
+	}
+}
+
 // A body exactly at the limit must succeed: multipart framing must not be
 // mistaken for payload.
 func TestUploadAtExactLimit(t *testing.T) {
@@ -356,6 +423,11 @@ func TestUploadRejectsWrongContentType(t *testing.T) {
 		{"octet stream", "application/octet-stream"},
 		{"empty", ""},
 		{"garbage", "not a media type"},
+		// The multipart parser would accept mixed; this service stores one
+		// file, so only form-data is offered and the rest is a 415 rather
+		// than a 400 from inside the parser.
+		{"mixed", "multipart/mixed; boundary=x"},
+		{"related", "multipart/related; boundary=x"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -942,6 +1014,10 @@ func TestNewValidatesOptions(t *testing.T) {
 		Logger: log}); err == nil {
 		t.Error("New without an authenticator succeeded")
 	}
+	if _, err := New(Options{Config: DefaultConfig(), Store: st,
+		Auth: a}); err == nil {
+		t.Error("New without a logger succeeded")
+	}
 	cfg := DefaultConfig()
 	cfg.MaxUploadBytes = 0
 	if _, err := New(Options{Config: cfg, Store: st, Auth: a,
@@ -956,9 +1032,9 @@ func TestNewValidatesOptions(t *testing.T) {
 	}
 }
 
-// The default limit is quoted in the README, in the flag help and in the
-// deployment manifests. Guard the number here so a change to the constant
-// cannot leave the documentation quietly wrong.
+// The default limit is quoted in the README and doubled by the flag's own
+// default. Guard the number here so a change to the constant cannot leave
+// either quietly wrong.
 func TestDefaultUploadLimit(t *testing.T) {
 	t.Parallel()
 	const want = 10 << 20 // 10 MiB

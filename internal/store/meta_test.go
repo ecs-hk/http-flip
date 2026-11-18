@@ -10,10 +10,7 @@ import (
 func TestMetaRoundTrip(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
-	want := Meta{
-		Filename:    "Quarterly Report v2 FINAL.pdf",
-		ContentType: "application/pdf",
-	}
+	want := Meta{Filename: "Quarterly Report v2 FINAL.pdf"}
 	obj, err := s.Create(strings.NewReader("payload"), 1<<20, want)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -112,6 +109,32 @@ func TestReadMetaToleratesCorruptSidecar(t *testing.T) {
 	}
 }
 
+// A sidecar written by a build that also recorded the part's content type
+// must still yield its filename; the retired field is ignored.
+func TestReadMetaIgnoresRetiredFields(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	obj, err := s.Create(strings.NewReader("x"), 1<<20, Meta{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	dir, name, _ := strings.Cut(
+		strings.TrimPrefix(obj.Path, Rel+"/"), "/")
+	legacy := `{"filename":"old.txt","content_type":"text/plain"}`
+	if err := os.WriteFile(
+		filepath.Join(s.dir, relPath(dir, metaName(name))),
+		[]byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy sidecar: %v", err)
+	}
+	got, err := s.ReadMeta(obj.Path)
+	if err != nil {
+		t.Fatalf("ReadMeta: %v", err)
+	}
+	if got.Filename != "old.txt" {
+		t.Errorf("Filename = %q, want old.txt", got.Filename)
+	}
+}
+
 // The sidecar must not itself be addressable: its name does not match the
 // object grammar, so a request for it is a miss rather than a leak.
 func TestSidecarIsNotServable(t *testing.T) {
@@ -190,7 +213,7 @@ func TestEscapableFilenameSurvivesSidecar(t *testing.T) {
 	// still hold the longest permitted name at that width.
 	long := strings.Repeat("<", MaxFilenameLen)
 	obj, err := s.Create(strings.NewReader("x"), 1<<20,
-		Meta{Filename: long, ContentType: "text/plain"})
+		Meta{Filename: long})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

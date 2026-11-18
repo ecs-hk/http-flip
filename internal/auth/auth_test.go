@@ -82,8 +82,7 @@ func TestParseRejects(t *testing.T) {
 		{"short secret", "alpha  abc123  -"},
 		{"long secret", "alpha  " + secretA + "00  -"},
 		{"non-hex secret", "alpha  " + strings.Repeat("z", 64) + "  -"},
-		{"uppercase hex is fine but wrong length here",
-			"alpha  " + strings.Repeat("A", 32) + "  -"},
+		{"32 hex characters", "alpha  " + strings.Repeat("A", 32) + "  -"},
 		{"expiry not rfc3339", "alpha  " + secretA + "  next tuesday"},
 		{"expiry date only", "alpha  " + secretA + "  2030-01-02"},
 		{"duplicate name",
@@ -94,8 +93,7 @@ func TestParseRejects(t *testing.T) {
 		{"name with newline escape", "alpha\\n  " + secretA + "  -"},
 		{"name with slash", "alpha/beta  " + secretA + "  -"},
 		{"name too long", strings.Repeat("a", 65) + "  " + secretA + "  -"},
-		{"secret as uppercase hex of right length is still not hex-per-byte",
-			"alpha  " + strings.Repeat("Z", 64) + "  -"},
+		{"64 non-hex characters", "alpha  " + strings.Repeat("Z", 64) + "  -"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -387,24 +385,20 @@ func TestConcurrentAuthenticateDuringReloads(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, 16)
 
-	// One writer churning the file underneath.
+	// One writer churning the file underneath, alternating between two valid
+	// sets so the published pointer really is replaced as readers run.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for range 50 {
-			text := []byte("alpha  " + secretA + "  -\n")
+		withBeta := "alpha  " + secretA + "  -\nbeta  " + secretB + "  -\n"
+		withoutBeta := "alpha  " + secretA + "  -\n"
+		for i := range 50 {
+			text := []byte(withoutBeta)
+			if i%2 == 0 {
+				text = []byte(withBeta)
+			}
 			if err := os.WriteFile(path, text, 0o600); err != nil {
 				errs <- fmt.Errorf("write: %w", err)
-				return
-			}
-			st, err := os.Stat(path)
-			if err != nil {
-				errs <- fmt.Errorf("stat: %w", err)
-				return
-			}
-			next := st.ModTime().Add(time.Second)
-			if err := os.Chtimes(path, next, next); err != nil {
-				errs <- fmt.Errorf("chtimes: %w", err)
 				return
 			}
 		}
@@ -431,9 +425,11 @@ func TestConcurrentAuthenticateDuringReloads(t *testing.T) {
 	}
 }
 
-// The comparison must not short-circuit: a match has to cost the same as a
-// miss, or the difference in work is measurable from outside.
-func TestAuthenticateDoesNotShortCircuit(t *testing.T) {
+// The comparison must not short-circuit, so a hit has to cost the same as a
+// miss. Timing cannot be asserted reliably here; what this pins is that a
+// large credential set is walked correctly for both a first-position hit and
+// a miss. The early-exit rule itself is documented on Authenticate.
+func TestAuthenticateAgainstManyCredentials(t *testing.T) {
 	t.Parallel()
 	// Many credentials, so a first-match early return would save most of the
 	// work on a hit and almost none on a miss.
@@ -469,25 +465,11 @@ func secretFor(i int) string {
 		string(rune('0'+(i+1)%10))
 }
 
-// rewrite replaces a file's contents and forces its mtime forward, so the
-// reload check fires regardless of how coarse the filesystem's timestamps are.
+// rewrite replaces a file's contents. Reload re-reads the file on every
+// authenticated request, so no timestamp dance is needed to make it notice.
 func rewrite(t *testing.T, path, text string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
 		t.Fatalf("WriteFile: %v", err)
-	}
-	bump(t, path)
-}
-
-// bump moves a file's mtime one second into the future.
-func bump(t *testing.T, path string) {
-	t.Helper()
-	st, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("Stat: %v", err)
-	}
-	next := st.ModTime().Add(time.Second)
-	if err := os.Chtimes(path, next, next); err != nil {
-		t.Fatalf("Chtimes: %v", err)
 	}
 }

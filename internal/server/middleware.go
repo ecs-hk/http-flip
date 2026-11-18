@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"time"
 
@@ -56,12 +57,12 @@ func (s *Server) authed(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, err := bearerToken(r)
 		if err != nil {
-			s.reject(w, r, auth.Identity{}, err)
+			s.reject(w, r, err)
 			return
 		}
 		id, err := s.auth.Authenticate(token)
 		if err != nil {
-			s.reject(w, r, auth.Identity{}, err)
+			s.reject(w, r, err)
 			return
 		}
 		ctx := context.WithValue(r.Context(), identityKey{}, id)
@@ -75,17 +76,16 @@ func (s *Server) authed(next http.Handler) http.Handler {
 // operational situation: the caller was valid and something changed, which is
 // a rotation the operator did not finish or a clock the operator did not
 // expect. Everything else is 401 with a challenge, per RFC 9110.
-func (s *Server) reject(
-	w http.ResponseWriter, r *http.Request, id auth.Identity, err error,
-) {
+func (s *Server) reject(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, auth.ErrExpired):
-		s.log.Warn("refused upload with expired token",
-			"remote", remoteOf(r), "reason", err)
+		s.log.Warn("refused request with expired token",
+			"method", r.Method, "remote", remoteOf(r), "reason", err)
 		s.writeJSON(w, http.StatusForbidden,
 			errorBody{Error: "this token has expired"})
 	case errors.Is(err, auth.ErrNoToken):
-		s.log.Warn("refused upload with no token", "remote", remoteOf(r))
+		s.log.Warn("refused request with no token",
+			"method", r.Method, "remote", remoteOf(r))
 		w.Header().Set("WWW-Authenticate", bearerChallenge)
 		s.writeJSON(w, http.StatusUnauthorized,
 			errorBody{Error: "a bearer token is required"})
@@ -93,8 +93,8 @@ func (s *Server) reject(
 		// An unknown token may be a typo or may be a probe. Both are logged
 		// at warn without the presented value, which is never worth
 		// recording even in a log the operator trusts.
-		s.log.Warn("refused upload with unrecognised token",
-			"remote", remoteOf(r), "reason", err)
+		s.log.Warn("refused request with unrecognised token",
+			"method", r.Method, "remote", remoteOf(r), "reason", err)
 		w.Header().Set("WWW-Authenticate", bearerChallenge)
 		s.writeJSON(w, http.StatusUnauthorized,
 			errorBody{Error: "the bearer token is not recognised"})
@@ -162,10 +162,12 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		// embeds one leak it onward through the Referer header.
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Cross-Origin-Resource-Policy", "same-origin")
-		// JSON and probe responses are never rendered, but a default that
-		// denies everything costs nothing; downloads set a stricter value
-		// of their own. HSTS is honored on the Route's edge TLS and
-		// ignored by plain-HTTP in-cluster probes.
+		// JSON, probe and download responses are never rendered. One policy
+		// covers all of them: sandbox denies script, forms and navigation,
+		// and default-src 'none' refuses every subresource. The download
+		// handler deliberately adds nothing, so a reader has one place to
+		// look. HSTS is honored on the Route's edge TLS and ignored by
+		// plain-HTTP in-cluster probes.
 		h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
 		h.Set("Strict-Transport-Security",
 			"max-age=63072000; includeSubDomains")
@@ -202,14 +204,6 @@ func (rec *recorder) Write(b []byte) (int, error) {
 // Unwrap lets http.ResponseController reach the underlying writer.
 func (rec *recorder) Unwrap() http.ResponseWriter { return rec.ResponseWriter }
 
-// probePaths are logged at debug because an OpenShift probe fires every few
-// seconds and would otherwise bury every real event.
-var probePaths = map[string]bool{
-	"/healthz": true,
-	"/livez":   true,
-	"/readyz":  true,
-}
-
 // logRequests emits one line per request.
 func (s *Server) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -221,7 +215,7 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 		}
 
 		level := slog.LevelInfo
-		if probePaths[r.URL.Path] {
+		if slices.Contains(probePaths, r.URL.Path) {
 			level = slog.LevelDebug
 		}
 		s.log.Log(r.Context(), level, "request",

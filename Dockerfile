@@ -1,13 +1,17 @@
 # Build stage. Pinned to the toolchain in go.mod; pin by digest on release
 # (docker inspect --format '{{.RepoDigests}}') so a rebuild is reproducible.
 FROM docker.io/library/golang:1.24.4 AS build
+# Release builds pass -X main.version=... so -version reports the release
+# rather than the fallback.
+ARG VERSION=dev
 WORKDIR /src
 # Dependencies first, so a source-only change reuses the module layer. This
 # project has no third-party dependencies, so go.mod alone is enough.
 COPY go.mod ./
 COPY main.go ./
 COPY internal/ ./internal/
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/httpflip .
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-s -w -X main.version=${VERSION}" -o /out/httpflip .
 
 # Runtime stage. Pin by digest on release for the same reason as above.
 FROM gcr.io/distroless/static-debian12:nonroot

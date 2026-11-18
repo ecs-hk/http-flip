@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -94,7 +95,17 @@ func New(dir string, log *slog.Logger) (*Store, error) {
 	if err := os.Remove(filepath.Join(dir, ".writable")); err != nil {
 		return nil, fmt.Errorf("remove probe file: %w", err)
 	}
-	return &Store{dir: dir, fs: root, log: log}, nil
+	s := &Store{dir: dir, fs: root, log: log}
+	// A pod killed mid-upload leaves a temp file inside an object directory
+	// that nothing else will ever name, because the name it would have been
+	// renamed to was never returned to a client. Reclaim that space at
+	// startup rather than only when an operator notices.
+	if n, err := s.sweepTemp(); err != nil {
+		log.Warn("could not sweep interrupted uploads", "dir", dir, "err", err)
+	} else if n > 0 {
+		log.Info("removed leftovers of interrupted uploads", "files", n)
+	}
+	return s, nil
 }
 
 // Dir returns the directory backing the store.
@@ -118,12 +129,9 @@ func (s *Store) Close() error {
 // reader can never observe a partial object, and an interrupted upload leaves
 // nothing behind but a removed temp file.
 func (s *Store) Create(r io.Reader, limit int64, meta Meta) (*Object, error) {
-	// Truncate up front so the returned Meta matches what the sidecar
-	// holds and what a later download reports in its headers.
-	meta = Meta{
-		Filename:    truncateRunes(meta.Filename, MaxFilenameLen),
-		ContentType: truncateRunes(meta.ContentType, MaxFilenameLen),
-	}
+	// Truncate up front so the returned Meta matches what the sidecar holds,
+	// and so writeMeta can store it verbatim.
+	meta = Meta{Filename: truncateRunes(meta.Filename, MaxFilenameLen)}
 	// The name is minted before the directory so that the only failures
 	// after the directory exists all have a temp file to clean up. It also
 	// cannot collide: a name collision would need the freshly created,
@@ -157,13 +165,13 @@ func (s *Store) Create(r io.Reader, limit int64, meta Meta) (*Object, error) {
 	// A sidecar failure is reported but does not fail the upload: the object
 	// is already durably stored, and a download with no original filename is
 	// a far better outcome than a lost file.
+	p := Rel + "/" + dir + "/" + name
 	if err := s.writeMeta(dir, name, meta); err != nil {
 		s.log.Warn("stored object without its description",
-			"path", Rel+"/"+dir+"/"+name, "err", err)
+			"path", p, "err", err)
 	}
 	return &Object{
-		Path:   Rel + "/" + dir + "/" + name,
-		Name:   name,
+		Path:   p,
 		Size:   size,
 		SHA256: hex.EncodeToString(sum),
 		Meta:   meta,
@@ -193,19 +201,6 @@ func (s *Store) Open(p string) (*os.File, error) {
 		return nil, ErrNotFound
 	}
 	return f, nil
-}
-
-// Stat returns metadata for the object at p without opening it for reading.
-func (s *Store) Stat(p string) (fs.FileInfo, error) {
-	dir, name, ok := validatePath(p)
-	if !ok {
-		return nil, ErrNotFound
-	}
-	info, err := s.fs.Stat(relPath(dir, name))
-	if err != nil || !info.Mode().IsRegular() {
-		return nil, ErrNotFound
-	}
-	return info, nil
 }
 
 // Delete removes the object at p along with its sidecar and, when left
@@ -322,6 +317,57 @@ func (s *Store) discard(dir string, tmp ...string) {
 // relPath joins two generated names into a store-relative path.
 func relPath(dir, name string) string {
 	return dir + "/" + name
+}
+
+// sweepTemp removes temp files left by an upload that never completed, along
+// with the object directory that held one when nothing else is in it.
+//
+// Only names this package could have generated are touched: a directory has to
+// match dirNamePattern and a file has to carry tmpPrefix. Anything else is an
+// operator's business and is left alone.
+func (s *Store) sweepTemp() (int, error) {
+	dirs, err := s.readDir(".")
+	if err != nil {
+		return 0, fmt.Errorf("scan data dir: %w", err)
+	}
+	removed := 0
+	for _, d := range dirs {
+		if !d.IsDir() || !dirNamePattern.MatchString(d.Name()) {
+			continue
+		}
+		entries, err := s.readDir(d.Name())
+		if err != nil {
+			// Vanished under us, or unreadable: either way there is no
+			// debris here this pass can account for.
+			continue
+		}
+		empty := true
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasPrefix(e.Name(), tmpPrefix) {
+				empty = false
+				continue
+			}
+			if err := s.fs.Remove(relPath(d.Name(), e.Name())); err != nil {
+				empty = false
+				continue
+			}
+			removed++
+		}
+		if empty {
+			_ = s.fs.Remove(d.Name())
+		}
+	}
+	return removed, nil
+}
+
+// readDir lists a store-relative directory without leaving the root.
+func (s *Store) readDir(name string) ([]os.DirEntry, error) {
+	f, err := s.fs.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return f.ReadDir(-1)
 }
 
 // probeWritable fails fast if the volume is mounted read-only.

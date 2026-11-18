@@ -175,11 +175,6 @@ func discardLogger() *slog.Logger {
 
 func newStore(t *testing.T) *Store {
 	t.Helper()
-	t.Cleanup(func() {
-		if err := os.RemoveAll(t.TempDir()); err != nil {
-			t.Errorf("cleanup: %v", err)
-		}
-	})
 	dir := filepath.Join(t.TempDir(), "data")
 	s, err := New(dir, discardLogger())
 	if err != nil {
@@ -231,7 +226,7 @@ func TestCreatePathShape(t *testing.T) {
 	// The caller-supplied name must not influence the stored path at all.
 	obj, err := s.Create(
 		strings.NewReader("x"), 1<<20,
-		Meta{Filename: "../../etc/passwd", ContentType: "text/html"},
+		Meta{Filename: "../../etc/passwd"},
 	)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -323,11 +318,6 @@ func TestOpenMissing(t *testing.T) {
 	) {
 		t.Fatalf("Open err = %v, want ErrNotFound", err)
 	}
-	if _, err := s.Stat(Rel + "/" + dir + "/" + name); !errors.Is(
-		err, ErrNotFound,
-	) {
-		t.Fatalf("Stat err = %v, want ErrNotFound", err)
-	}
 }
 
 func TestOpenMalformed(t *testing.T) {
@@ -343,9 +333,6 @@ func TestOpenMalformed(t *testing.T) {
 	} {
 		if _, err := s.Open(p); !errors.Is(err, ErrNotFound) {
 			t.Errorf("Open(%q) err = %v, want ErrNotFound", p, err)
-		}
-		if _, err := s.Stat(p); !errors.Is(err, ErrNotFound) {
-			t.Errorf("Stat(%q) err = %v, want ErrNotFound", p, err)
 		}
 	}
 }
@@ -373,11 +360,11 @@ func TestOpenDirectoryIsNotAnObject(t *testing.T) {
 	}
 }
 
-func TestPermissionsSurviveUmask(t *testing.T) {
+// The store pins exact modes rather than relying on Mkdir/OpenFile and the
+// process umask, which is what the OpenShift random-UID story depends on.
+func TestPinnedPermissions(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
-	// Create does not mutate global umask state, so this test asserts the
-	// mode the store pins, which is what matters regardless of how the
-	// process was started.
 	obj, err := s.Create(strings.NewReader("x"), 1024, Meta{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -535,5 +522,72 @@ func TestNewRejectsUnwritableDir(t *testing.T) {
 	}
 	if _, err := New(dir, discardLogger()); err == nil {
 		t.Error("New succeeded on a read-only directory, want error")
+	}
+}
+
+// An upload interrupted by a killed pod leaves a temp file whose name was
+// never handed to a client. Startup must reclaim it and the empty directory
+// around it, and must not disturb a completed object.
+func TestNewSweepsInterruptedUploads(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "data")
+	s, err := New(dir, discardLogger())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	obj, err := s.Create(strings.NewReader("payload"), 1024,
+		Meta{Filename: "keep.txt"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	objDir, _, ok := validatePath(obj.Path)
+	if !ok {
+		t.Fatalf("stored path %q is not well formed", obj.Path)
+	}
+
+	// Debris beside a live object.
+	stray := filepath.Join(dir, objDir, tmpPrefix+"abandoned")
+	if err := os.WriteFile(stray, []byte("partial"), 0o600); err != nil {
+		t.Fatalf("write stray: %v", err)
+	}
+	// A directory holding nothing but debris.
+	debrisDir, err := randomBase58(dirNameLen)
+	if err != nil {
+		t.Fatalf("randomBase58: %v", err)
+	}
+	if err := s.fs.Mkdir(debrisDir, dirCreateMode); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	debris := filepath.Join(dir, debrisDir, tmpPrefix+"abandoned")
+	if err := os.WriteFile(debris, []byte("partial"), 0o600); err != nil {
+		t.Fatalf("write debris: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	s2, err := New(dir, discardLogger())
+	if err != nil {
+		t.Fatalf("New after debris: %v", err)
+	}
+	t.Cleanup(func() { _ = s2.Close() })
+
+	for _, gone := range []string{stray, filepath.Dir(debris)} {
+		if _, err := os.Stat(gone); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s survived the sweep (err = %v)", gone, err)
+		}
+	}
+	// The completed object, its sidecar and its directory are untouched.
+	f, err := s2.Open(obj.Path)
+	if err != nil {
+		t.Fatalf("Open after sweep: %v", err)
+	}
+	_ = f.Close()
+	meta, err := s2.ReadMeta(obj.Path)
+	if err != nil {
+		t.Fatalf("ReadMeta after sweep: %v", err)
+	}
+	if meta.Filename != "keep.txt" {
+		t.Errorf("filename after sweep = %q, want keep.txt", meta.Filename)
 	}
 }

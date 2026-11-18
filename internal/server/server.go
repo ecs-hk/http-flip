@@ -100,13 +100,20 @@ type Server struct {
 	http  *http.Server
 }
 
+// probePaths are answered without authentication. Routing, the 405 fallback
+// and the request log all read this one list, so a probe cannot be added to
+// one of them and forgotten in the others. They are logged at debug because
+// an OpenShift probe fires every few seconds and would otherwise bury every
+// real event.
+var probePaths = []string{"/healthz", "/livez", "/readyz"}
+
 // Construction errors. These are programming mistakes rather than runtime
 // conditions, so they are plain sentinels rather than wrapped errors.
 var (
 	errNoStore       = errors.New("server: a store is required")
 	errNoAuth        = errors.New("server: an authenticator is required")
+	errNoLogger      = errors.New("server: a logger is required")
 	errNoUploadLimit = errors.New("server: MaxUploadBytes must be positive")
-	errUploadLimit   = errors.New("server: MaxUploadBytes unreasonably large")
 )
 
 // maxSaneUploadBytes caps the operator flag so that MaxUploadBytes+bodySlack
@@ -130,11 +137,16 @@ func New(opts Options) (*Server, error) {
 	if opts.Auth == nil {
 		return nil, errNoAuth
 	}
+	if opts.Logger == nil {
+		return nil, errNoLogger
+	}
 	if opts.Config.MaxUploadBytes <= 0 {
 		return nil, errNoUploadLimit
 	}
 	if opts.Config.MaxUploadBytes > maxSaneUploadBytes {
-		return nil, errUploadLimit
+		return nil, fmt.Errorf(
+			"server: MaxUploadBytes %d exceeds the %d byte maximum",
+			opts.Config.MaxUploadBytes, maxSaneUploadBytes)
 	}
 	s := &Server{
 		cfg:   opts.Config,
@@ -213,7 +225,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE "+store.Rel+"/{dir}/{name}",
 		s.authed(http.HandlerFunc(s.handleDelete)))
 
-	for _, probe := range []string{"/healthz", "/livez", "/readyz"} {
+	for _, probe := range probePaths {
 		mux.Handle("GET "+probe, http.HandlerFunc(s.handleProbe))
 	}
 

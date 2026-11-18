@@ -28,6 +28,9 @@ spec:
       # Must exceed the service's own -shutdown-timeout of 30s, so that Go
       # finishes its drain before the kubelet escalates to SIGKILL.
       terminationGracePeriodSeconds: 45
+      # The pod never talks to the API server, so it has no business holding
+      # a service account token.
+      automountServiceAccountToken: false
       securityContext:
         # No runAsUser is set on purpose. OpenShift assigns a UID from the
         # namespace range, and it is different on every pod start. The service
@@ -47,8 +50,10 @@ spec:
       containers:
         - name: httpflip
           image: image-registry.openshift-image-registry.svc:5000/httpflip:latest
-          # imagePullPolicy: Always for an ":latest" tag built into the
-          # internal registry.
+          # Always, because the tag is ":latest" from the internal registry:
+          # the kubelet defaults to this for that tag, but stating it stops a
+          # node with a warm cache from running yesterday's build.
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 8080

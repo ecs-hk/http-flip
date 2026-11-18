@@ -23,11 +23,10 @@ const (
 	MaxFilenameLen = 255
 
 	// maxMetaLen bounds what ReadMeta will read. It must allow the longest
-	// permitted field at its worst-case encoded width, plus room for the
-	// JSON scaffolding: a filename of MaxFilenameLen runes can occupy 6
-	// bytes per rune once JSON-escaped (<, >, & and controls become
-	// \u00xx), and both fields are present at once.
-	maxMetaLen = 6*2*MaxFilenameLen + 512
+	// permitted field at its worst-case encoded width, plus room for the JSON
+	// scaffolding: a filename of MaxFilenameLen runes can occupy 6 bytes per
+	// rune once JSON-escaped (<, >, & and controls become \u00xx).
+	maxMetaLen = 6*MaxFilenameLen + 512
 )
 
 // Meta is the caller-supplied description of an upload.
@@ -35,30 +34,24 @@ const (
 // It is advisory. An object must remain retrievable if its sidecar is missing
 // or unreadable, because the bytes are what this service exists to keep.
 type Meta struct {
-	Filename    string `json:"filename"`
-	ContentType string `json:"content_type"`
+	Filename string `json:"filename"`
 }
 
 // Object describes a stored upload. Path is a URL path that can be handed
 // straight back to a client for download.
 type Object struct {
-	Path   string `json:"path"`
-	Name   string `json:"-"`
-	Size   int64  `json:"size"`
-	SHA256 string `json:"sha256"`
-	Meta   Meta   `json:"meta"`
+	Path   string
+	Size   int64
+	SHA256 string
+	Meta   Meta
 }
 
 // writeMeta records the description alongside a freshly renamed object.
 //
 // This runs after the rename, so a sidecar failure leaves the object fully
 // retrievable under its random name. Losing the description is a much smaller
-// outcome than losing the file.
+// outcome than losing the file. The caller has already normalised meta.
 func (s *Store) writeMeta(dir, name string, meta Meta) error {
-	meta = Meta{
-		Filename:    truncateRunes(meta.Filename, MaxFilenameLen),
-		ContentType: truncateRunes(meta.ContentType, MaxFilenameLen),
-	}
 	blob, err := json.Marshal(meta)
 	if err != nil {
 		return fmt.Errorf("encode meta: %w", err)

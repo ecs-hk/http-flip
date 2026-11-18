@@ -3,8 +3,8 @@
 //
 // Each presented token is compared against every configured credential without
 // early exit, so response timing does not reveal how much of it was correct.
-// The file is re-read on every upload, which lets an operator rotate or revoke
-// a token by editing a Secret, with no pod restart.
+// The file is re-read on every authenticated request, which lets an operator
+// rotate or revoke a token by editing a Secret, with no pod restart.
 package auth
 
 import (
@@ -94,8 +94,8 @@ type Authenticator struct {
 //
 // It fails if the file cannot be read, is malformed, or yields no usable
 // credentials. That strictness is the point: a service that starts with an
-// empty token set would silently accept every upload, turning a broken volume
-// mount into an open endpoint.
+// empty token set would silently accept every request, turning a broken
+// volume mount into an open endpoint.
 func New(path string, log *slog.Logger) (*Authenticator, error) {
 	tokens, err := load(path)
 	if err != nil {
